@@ -14,7 +14,6 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-import dataclasses
 import logging
 import re
 import textwrap
@@ -23,7 +22,19 @@ from collections import defaultdict, deque
 from contextlib import closing
 from datetime import datetime
 from distutils.version import StrictVersion
-from typing import Any, cast, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Dict,
+    List,
+    Match,
+    Optional,
+    Pattern,
+    Tuple,
+    TYPE_CHECKING,
+    Union,
+)
 from urllib import parse
 
 import pandas as pd
@@ -36,6 +47,7 @@ from sqlalchemy.engine.result import RowProxy
 from sqlalchemy.engine.url import make_url, URL
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import ColumnClause, Select
+from sqlalchemy.types import TypeEngine
 
 from superset import app, cache_manager, is_feature_enabled
 from superset.db_engine_specs.base import BaseEngineSpec
@@ -52,6 +64,7 @@ from superset.models.sql_types.presto_sql_types import (
 from superset.result_set import destringify
 from superset.sql_parse import ParsedQuery
 from superset.utils import core as utils
+from superset.utils.core import ColumnSpec, GenericDataType
 
 if TYPE_CHECKING:
     # prevent circular imports
@@ -114,6 +127,7 @@ def get_children(column: Dict[str, str]) -> List[Dict[str, str]]:
 class PrestoEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-methods
     engine = "presto"
     engine_name = "Presto"
+    allows_alias_to_source_column = False
 
     _time_grain_expressions = {
         None: "{col}",
@@ -293,7 +307,8 @@ class PrestoEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-metho
                         field_info = cls._split_data_type(single_field, r"\s")
                         # check if there is a structural data type within
                         # overall structural data type
-                        column_type = cls.get_sqla_column_type(field_info[1])
+                        column_spec = cls.get_column_spec(field_info[1])
+                        column_type = column_spec.sqla_type if column_spec else None
                         if column_type is None:
                             column_type = types.String()
                             logger.info(
@@ -356,31 +371,89 @@ class PrestoEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-metho
         return columns
 
     column_type_mappings = (
-        (re.compile(r"^boolean.*", re.IGNORECASE), types.Boolean()),
-        (re.compile(r"^tinyint.*", re.IGNORECASE), TinyInteger()),
-        (re.compile(r"^smallint.*", re.IGNORECASE), types.SmallInteger()),
-        (re.compile(r"^integer.*", re.IGNORECASE), types.Integer()),
-        (re.compile(r"^bigint.*", re.IGNORECASE), types.BigInteger()),
-        (re.compile(r"^real.*", re.IGNORECASE), types.Float()),
-        (re.compile(r"^double.*", re.IGNORECASE), types.Float()),
-        (re.compile(r"^decimal.*", re.IGNORECASE), types.DECIMAL()),
+        (
+            re.compile(r"^boolean.*", re.IGNORECASE),
+            types.BOOLEAN,
+            utils.GenericDataType.BOOLEAN,
+        ),
+        (
+            re.compile(r"^tinyint.*", re.IGNORECASE),
+            TinyInteger(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^smallint.*", re.IGNORECASE),
+            types.SMALLINT(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^integer.*", re.IGNORECASE),
+            types.INTEGER(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^bigint.*", re.IGNORECASE),
+            types.BIGINT(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^real.*", re.IGNORECASE),
+            types.FLOAT(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^double.*", re.IGNORECASE),
+            types.FLOAT(),
+            utils.GenericDataType.NUMERIC,
+        ),
+        (
+            re.compile(r"^decimal.*", re.IGNORECASE),
+            types.DECIMAL(),
+            utils.GenericDataType.NUMERIC,
+        ),
         (
             re.compile(r"^varchar(\((\d+)\))*$", re.IGNORECASE),
             lambda match: types.VARCHAR(int(match[2])) if match[2] else types.String(),
+            utils.GenericDataType.STRING,
         ),
         (
             re.compile(r"^char(\((\d+)\))*$", re.IGNORECASE),
             lambda match: types.CHAR(int(match[2])) if match[2] else types.CHAR(),
+            utils.GenericDataType.STRING,
         ),
-        (re.compile(r"^varbinary.*", re.IGNORECASE), types.VARBINARY()),
-        (re.compile(r"^json.*", re.IGNORECASE), types.JSON()),
-        (re.compile(r"^date.*", re.IGNORECASE), types.DATE()),
-        (re.compile(r"^timestamp.*", re.IGNORECASE), types.TIMESTAMP()),
-        (re.compile(r"^time.*", re.IGNORECASE), types.Time()),
-        (re.compile(r"^interval.*", re.IGNORECASE), Interval()),
-        (re.compile(r"^array.*", re.IGNORECASE), Array()),
-        (re.compile(r"^map.*", re.IGNORECASE), Map()),
-        (re.compile(r"^row.*", re.IGNORECASE), Row()),
+        (
+            re.compile(r"^varbinary.*", re.IGNORECASE),
+            types.VARBINARY(),
+            utils.GenericDataType.STRING,
+        ),
+        (
+            re.compile(r"^json.*", re.IGNORECASE),
+            types.JSON(),
+            utils.GenericDataType.STRING,
+        ),
+        (
+            re.compile(r"^date.*", re.IGNORECASE),
+            types.DATE(),
+            utils.GenericDataType.TEMPORAL,
+        ),
+        (
+            re.compile(r"^timestamp.*", re.IGNORECASE),
+            types.TIMESTAMP(),
+            utils.GenericDataType.TEMPORAL,
+        ),
+        (
+            re.compile(r"^interval.*", re.IGNORECASE),
+            Interval(),
+            utils.GenericDataType.TEMPORAL,
+        ),
+        (
+            re.compile(r"^time.*", re.IGNORECASE),
+            types.Time(),
+            utils.GenericDataType.TEMPORAL,
+        ),
+        (re.compile(r"^array.*", re.IGNORECASE), Array(), utils.GenericDataType.STRING),
+        (re.compile(r"^map.*", re.IGNORECASE), Map(), utils.GenericDataType.STRING),
+        (re.compile(r"^row.*", re.IGNORECASE), Row(), utils.GenericDataType.STRING),
     )
 
     @classmethod
@@ -412,7 +485,8 @@ class PrestoEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-metho
                 continue
 
             # otherwise column is a basic data type
-            column_type = cls.get_sqla_column_type(column.Type)
+            column_spec = cls.get_column_spec(column.Type)
+            column_type = column_spec.sqla_type if column_spec else None
             if column_type is None:
                 column_type = types.String()
                 logger.info(
@@ -1058,56 +1132,67 @@ class PrestoEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-metho
         return database.get_df("SHOW FUNCTIONS")["Function"].tolist()
 
     @classmethod
-    def extract_errors(cls, ex: Exception) -> List[Dict[str, Any]]:
+    def extract_errors(cls, ex: Exception) -> List[SupersetError]:
         raw_message = cls._extract_error_message(ex)
 
         column_match = re.search(COLUMN_NOT_RESOLVED_ERROR_REGEX, raw_message)
         if column_match:
             return [
-                dataclasses.asdict(
-                    SupersetError(
-                        error_type=SupersetErrorType.COLUMN_DOES_NOT_EXIST_ERROR,
-                        message=__(
-                            'We can\'t seem to resolve the column "%(column_name)s" at '
-                            "line %(location)s.",
-                            column_name=column_match.group(2),
-                            location=column_match.group(1),
-                        ),
-                        level=ErrorLevel.ERROR,
-                        extra={"engine_name": cls.engine_name},
-                    )
+                SupersetError(
+                    error_type=SupersetErrorType.COLUMN_DOES_NOT_EXIST_ERROR,
+                    message=__(
+                        'We can\'t seem to resolve the column "%(column_name)s" at '
+                        "line %(location)s.",
+                        column_name=column_match.group(2),
+                        location=column_match.group(1),
+                    ),
+                    level=ErrorLevel.ERROR,
+                    extra={"engine_name": cls.engine_name},
                 )
             ]
 
         table_match = re.search(TABLE_DOES_NOT_EXIST_ERROR_REGEX, raw_message)
         if table_match:
             return [
-                dataclasses.asdict(
-                    SupersetError(
-                        error_type=SupersetErrorType.TABLE_DOES_NOT_EXIST_ERROR,
-                        message=__(
-                            'The table "%(table_name)s" does not exist. '
-                            "A valid table must be used to run this query.",
-                            table_name=table_match.group(1),
-                        ),
-                        level=ErrorLevel.ERROR,
-                        extra={"engine_name": cls.engine_name},
-                    )
-                )
-            ]
-
-        return [
-            dataclasses.asdict(
                 SupersetError(
-                    error_type=SupersetErrorType.GENERIC_DB_ENGINE_ERROR,
-                    message=cls._extract_error_message(ex),
+                    error_type=SupersetErrorType.TABLE_DOES_NOT_EXIST_ERROR,
+                    message=__(
+                        'The table "%(table_name)s" does not exist. '
+                        "A valid table must be used to run this query.",
+                        table_name=table_match.group(1),
+                    ),
                     level=ErrorLevel.ERROR,
                     extra={"engine_name": cls.engine_name},
                 )
-            )
-        ]
+            ]
+
+        return super().extract_errors(ex)
 
     @classmethod
     def is_readonly_query(cls, parsed_query: ParsedQuery) -> bool:
         """Pessimistic readonly, 100% sure statement won't mutate anything"""
         return super().is_readonly_query(parsed_query) or parsed_query.is_show()
+
+    @classmethod
+    def get_column_spec(  # type: ignore
+        cls,
+        native_type: Optional[str],
+        source: utils.ColumnTypeSource = utils.ColumnTypeSource.GET_TABLE,
+        column_type_mappings: Tuple[
+            Tuple[
+                Pattern[str],
+                Union[TypeEngine, Callable[[Match[str]], TypeEngine]],
+                GenericDataType,
+            ],
+            ...,
+        ] = column_type_mappings,
+    ) -> Union[ColumnSpec, None]:
+
+        column_spec = super().get_column_spec(
+            native_type, column_type_mappings=column_type_mappings
+        )
+
+        if column_spec:
+            return column_spec
+
+        return super().get_column_spec(native_type)

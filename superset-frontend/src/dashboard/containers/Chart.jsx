@@ -61,12 +61,14 @@ function mapStateToProps(
   const formData = getFormDataWithExtraFilters({
     layout: dashboardLayout.present,
     chart,
+    // eslint-disable-next-line camelcase
+    chartConfiguration: dashboardInfo.metadata?.chart_configuration,
     charts: chartQueries,
     filters: getAppliedFilterValues(id),
     colorScheme,
     colorNamespace,
     sliceId: id,
-    nativeFilters: nativeFilters.filters,
+    nativeFilters,
     dataMask,
   });
 
@@ -85,6 +87,7 @@ function mapStateToProps(
     supersetCanCSV: !!dashboardInfo.superset_can_csv,
     sliceCanEdit: !!dashboardInfo.slice_can_edit,
     ownCurrentState: dataMask.ownFilters?.[id]?.currentState,
+    crossFilterCurrentState: dataMask.crossFilters?.[id]?.currentState,
   };
 }
 

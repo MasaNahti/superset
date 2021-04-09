@@ -18,41 +18,49 @@
  */
 
 /* eslint-disable no-param-reassign */
-import { styled, t } from '@superset-ui/core';
-import React, { useState, useEffect, useMemo } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { HandlerFunction, styled, t } from '@superset-ui/core';
+import React, { useMemo, useState } from 'react';
+import { useDispatch } from 'react-redux';
 import cx from 'classnames';
-import Button from 'src/components/Button';
 import Icon from 'src/components/Icon';
 import { Tabs } from 'src/common/components';
 import { FeatureFlag, isFeatureEnabled } from 'src/featureFlags';
 import { updateDataMask } from 'src/dataMask/actions';
-import {
-  DataMaskUnitWithId,
-  DataMaskUnit,
-  DataMaskState,
-} from 'src/dataMask/types';
+import { DataMaskState, DataMaskUnit } from 'src/dataMask/types';
 import { useImmer } from 'use-immer';
-import { getInitialMask } from 'src/dataMask/reducer';
 import { areObjectsEqual } from 'src/reduxUtils';
-import FilterConfigurationLink from './FilterConfigurationLink';
-import { useFilterConfiguration } from '../state';
 import { Filter } from '../types';
-import { buildCascadeFiltersTree, mapParentFiltersToChildren } from './utils';
-import CascadePopover from './CascadePopover';
-import FilterSets from './FilterSets';
+import { mapParentFiltersToChildren, TabIds } from './utils';
+import FilterSets from './FilterSets/FilterSets';
+import {
+  useDataMask,
+  useFilters,
+  useFilterSets,
+  useFiltersInitialisation,
+  useFilterUpdates,
+} from './state';
+import EditSection from './FilterSets/EditSection';
+import Header from './Header';
+import FilterControls from './FilterControls/FilterControls';
 
 const barWidth = `250px`;
 
 const BarWrapper = styled.div`
   width: ${({ theme }) => theme.gridUnit * 8}px;
-
+  & .ant-tabs-top > .ant-tabs-nav {
+    margin: 0;
+  }
   &.open {
     width: ${barWidth}; // arbitrary...
   }
 `;
 
 const Bar = styled.div`
+  & .ant-typography-edit-content {
+    left: 0;
+    margin-top: 0;
+    width: 100%;
+  }
   position: absolute;
   top: 0;
   left: 0;
@@ -118,26 +126,6 @@ const StyledCollapseIcon = styled(Icon)`
   margin-bottom: ${({ theme }) => theme.gridUnit * 3}px;
 `;
 
-const TitleArea = styled.h4`
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-  margin: 0;
-  padding: ${({ theme }) => theme.gridUnit * 2}px;
-
-  & > span {
-    flex-grow: 1;
-  }
-
-  & :not(:first-child) {
-    margin-left: ${({ theme }) => theme.gridUnit}px;
-
-    &:hover {
-      cursor: pointer;
-    }
-  }
-`;
-
 const StyledTabs = styled(Tabs)`
   & .ant-tabs-nav-list {
     width: 100%;
@@ -148,22 +136,6 @@ const StyledTabs = styled(Tabs)`
     margin: 0;
     flex: 1;
   }
-`;
-
-const ActionButtons = styled.div`
-  display: grid;
-  flex-direction: row;
-  grid-template-columns: 1fr 1fr;
-  ${({ theme }) =>
-    `padding: 0 ${theme.gridUnit * 2}px ${theme.gridUnit * 2}px`};
-
-  .btn {
-    flex: 1;
-  }
-`;
-
-const FilterControls = styled.div`
-  padding: 0 ${({ theme }) => theme.gridUnit * 4}px;
 `;
 
 interface FiltersBarProps {
@@ -177,60 +149,32 @@ const FilterBar: React.FC<FiltersBarProps> = ({
   toggleFiltersBar,
   directPathToChild,
 }) => {
-  const [filterData, setFilterData] = useImmer<DataMaskUnit>({});
+  const [editFilterSetId, setEditFilterSetId] = useState<string | null>(null);
+  const [dataMaskSelected, setDataMaskSelected] = useImmer<DataMaskUnit>({});
   const [
     lastAppliedFilterData,
     setLastAppliedFilterData,
   ] = useImmer<DataMaskUnit>({});
   const dispatch = useDispatch();
-  const dataMaskState = useSelector<any, DataMaskUnitWithId>(
-    state => state.dataMask.nativeFilters ?? {},
-  );
-  const filterConfigs = useFilterConfiguration();
-  const canEdit = useSelector<any, boolean>(
-    ({ dashboardInfo }) => dashboardInfo.dash_edit_perm,
-  );
-  const [visiblePopoverId, setVisiblePopoverId] = useState<string | null>(null);
-  const [isInitialized, setIsInitialized] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (isInitialized) {
-      return;
-    }
-    const areFiltersInitialized = filterConfigs.every(
-      filterConfig =>
-        filterConfig.defaultValue ===
-        filterData[filterConfig.id]?.currentState?.value,
-    );
-    if (areFiltersInitialized) {
-      setIsInitialized(true);
-    }
-  }, [filterConfigs, filterData, isInitialized]);
-
-  useEffect(() => {
-    if (filterConfigs.length === 0 && filtersOpen) {
-      toggleFiltersBar(false);
-    }
-  }, [filterConfigs]);
+  const filterSets = useFilterSets();
+  const filterSetFilterValues = Object.values(filterSets);
+  const [tab, setTab] = useState(TabIds.AllFilters);
+  const filters = useFilters();
+  const filterValues = Object.values<Filter>(filters);
+  const dataMaskApplied = useDataMask();
+  const [isFilterSetChanged, setIsFilterSetChanged] = useState(false);
 
   const cascadeChildren = useMemo(
-    () => mapParentFiltersToChildren(filterConfigs),
-    [filterConfigs],
+    () => mapParentFiltersToChildren(filterValues),
+    [filterValues],
   );
-
-  const cascadeFilters = useMemo(() => {
-    const filtersWithValue = filterConfigs.map(filter => ({
-      ...filter,
-      currentValue: filterData[filter.id]?.currentState?.value,
-    }));
-    return buildCascadeFiltersTree(filtersWithValue);
-  }, [filterConfigs, filterData]);
 
   const handleFilterSelectionChange = (
     filter: Pick<Filter, 'id'> & Partial<Filter>,
     dataMask: Partial<DataMaskState>,
   ) => {
-    setFilterData(draft => {
+    setIsFilterSetChanged(tab !== TabIds.AllFilters);
+    setDataMaskSelected(draft => {
       const children = cascadeChildren[filter.id] || [];
       // force instant updating on initialization or for parent filters
       if (filter.isInstant || children.length > 0) {
@@ -244,56 +188,32 @@ const FilterBar: React.FC<FiltersBarProps> = ({
   };
 
   const handleApply = () => {
-    const filterIds = Object.keys(filterData);
+    const filterIds = Object.keys(dataMaskSelected);
     filterIds.forEach(filterId => {
-      if (filterData[filterId]) {
+      if (dataMaskSelected[filterId]) {
         dispatch(
           updateDataMask(filterId, {
-            nativeFilters: filterData[filterId],
+            nativeFilters: dataMaskSelected[filterId],
           }),
         );
       }
     });
-    setLastAppliedFilterData(() => filterData);
+    setLastAppliedFilterData(() => dataMaskSelected);
   };
 
-  useEffect(() => {
-    if (isInitialized) {
-      handleApply();
-    }
-  }, [isInitialized]);
-
-  const handleClearAll = () => {
-    filterConfigs.forEach(filter => {
-      setFilterData(draft => {
-        draft[filter.id] = getInitialMask(filter.id);
-      });
-    });
-  };
-
-  const isClearAllDisabled = !Object.values(dataMaskState).every(
-    filter =>
-      filterData[filter.id]?.currentState?.value === null ||
-      (!filterData[filter.id] && filter.currentState?.value === null),
+  const { isInitialized } = useFiltersInitialisation(
+    dataMaskSelected,
+    handleApply,
   );
 
-  const getFilterControls = () => (
-    <FilterControls>
-      {cascadeFilters.map(filter => (
-        <CascadePopover
-          data-test="cascade-filters-control"
-          key={filter.id}
-          visible={visiblePopoverId === filter.id}
-          onVisibleChange={visible =>
-            setVisiblePopoverId(visible ? filter.id : null)
-          }
-          filter={filter}
-          onFilterSelectionChange={handleFilterSelectionChange}
-          directPathToChild={directPathToChild}
-        />
-      ))}
-    </FilterControls>
+  useFilterUpdates(
+    dataMaskSelected,
+    setDataMaskSelected,
+    setLastAppliedFilterData,
   );
+
+  const isApplyDisabled =
+    !isInitialized || areObjectsEqual(dataMaskSelected, lastAppliedFilterData);
 
   return (
     <BarWrapper data-test="filter-bar" className={cx({ open: filtersOpen })}>
@@ -305,62 +225,59 @@ const FilterBar: React.FC<FiltersBarProps> = ({
         <Icon name="filter" />
       </CollapsedBar>
       <Bar className={cx({ open: filtersOpen })}>
-        <TitleArea>
-          <span>{t('Filters')}</span>
-          {canEdit && (
-            <FilterConfigurationLink
-              createNewOnOpen={filterConfigs.length === 0}
-            >
-              <Icon name="edit" data-test="create-filter" />
-            </FilterConfigurationLink>
-          )}
-          <Icon name="expand" onClick={() => toggleFiltersBar(false)} />
-        </TitleArea>
-        <ActionButtons>
-          <Button
-            disabled={!isClearAllDisabled}
-            buttonStyle="tertiary"
-            buttonSize="small"
-            onClick={handleClearAll}
-            data-test="filter-reset-button"
-          >
-            {t('Clear all')}
-          </Button>
-          <Button
-            disabled={
-              !isInitialized ||
-              areObjectsEqual(filterData, lastAppliedFilterData)
-            }
-            buttonStyle="primary"
-            htmlType="submit"
-            buttonSize="small"
-            onClick={handleApply}
-            data-test="filter-apply-button"
-          >
-            {t('Apply')}
-          </Button>
-        </ActionButtons>
+        <Header
+          toggleFiltersBar={toggleFiltersBar}
+          onApply={handleApply}
+          setDataMaskSelected={setDataMaskSelected}
+          isApplyDisabled={isApplyDisabled}
+          dataMaskSelected={dataMaskSelected}
+          dataMaskApplied={dataMaskApplied}
+        />
         {isFeatureEnabled(FeatureFlag.DASHBOARD_NATIVE_FILTERS_SET) ? (
           <StyledTabs
             centered
-            defaultActiveKey="allFilters"
-            onChange={() => {}}
+            onChange={setTab as HandlerFunction}
+            defaultActiveKey={TabIds.AllFilters}
+            activeKey={editFilterSetId ? TabIds.AllFilters : undefined}
           >
             <Tabs.TabPane
-              tab={t(`All Filters (${filterConfigs.length})`)}
-              key="allFilters"
+              tab={t(`All Filters (${filterValues.length})`)}
+              key={TabIds.AllFilters}
             >
-              {getFilterControls()}
+              {editFilterSetId && (
+                <EditSection
+                  dataMaskSelected={dataMaskSelected}
+                  disabled={!isApplyDisabled}
+                  onCancel={() => setEditFilterSetId(null)}
+                  filterSetId={editFilterSetId}
+                />
+              )}
+              <FilterControls
+                dataMaskSelected={dataMaskSelected}
+                directPathToChild={directPathToChild}
+                onFilterSelectionChange={handleFilterSelectionChange}
+              />
             </Tabs.TabPane>
-            <Tabs.TabPane tab={t('Filter Sets')} key="filterSets">
+            <Tabs.TabPane
+              disabled={!!editFilterSetId}
+              tab={t(`Filter Sets (${filterSetFilterValues.length})`)}
+              key={TabIds.FilterSets}
+            >
               <FilterSets
-                dataMaskState={dataMaskState}
+                onEditFilterSet={setEditFilterSetId}
+                disabled={!isApplyDisabled}
+                dataMaskSelected={dataMaskSelected}
+                isFilterSetChanged={isFilterSetChanged}
                 onFilterSelectionChange={handleFilterSelectionChange}
               />
             </Tabs.TabPane>
           </StyledTabs>
         ) : (
-          getFilterControls()
+          <FilterControls
+            dataMaskSelected={dataMaskSelected}
+            directPathToChild={directPathToChild}
+            onFilterSelectionChange={handleFilterSelectionChange}
+          />
         )}
       </Bar>
     </BarWrapper>

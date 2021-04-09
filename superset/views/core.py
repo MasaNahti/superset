@@ -98,7 +98,7 @@ from superset.sql_parse import CtasMethod, ParsedQuery, Table
 from superset.sql_validators import get_validator_by_name
 from superset.tasks.async_queries import load_explore_json_into_cache
 from superset.typing import FlaskResponse
-from superset.utils import core as utils
+from superset.utils import core as utils, csv
 from superset.utils.async_query_manager import AsyncQueryTokenException
 from superset.utils.cache import etag_cache
 from superset.utils.core import ReservedUrlParameters
@@ -437,10 +437,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     ) -> FlaskResponse:
         if response_type == utils.ChartDataResultFormat.CSV:
             return CsvResponse(
-                viz_obj.get_csv(),
-                status=200,
-                headers=generate_download_headers("csv"),
-                mimetype="application/csv",
+                viz_obj.get_csv(), headers=generate_download_headers("csv")
             )
 
         if response_type == utils.ChartDataResultType.QUERY:
@@ -666,7 +663,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     @event_logger.log_this
     @expose("/explore/<datasource_type>/<int:datasource_id>/", methods=["GET", "POST"])
     @expose("/explore/", methods=["GET", "POST"])
-    def explore(  # pylint: disable=too-many-locals,too-many-return-statements
+    def explore(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-statements
         self, datasource_type: Optional[str] = None, datasource_id: Optional[int] = None
     ) -> FlaskResponse:
         user_id = g.user.get_id() if g.user else None
@@ -735,10 +732,6 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
                     f"datasource_id={datasource_id}&"
                 )
 
-            # if feature enabled, run some health check rules for sqla datasource
-            if hasattr(datasource, "health_check"):
-                datasource.health_check()
-
         viz_type = form_data.get("viz_type")
         if not viz_type and datasource and datasource.default_endpoint:
             return redirect(datasource.default_endpoint)
@@ -789,12 +782,18 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             "name": datasource_name,
             "columns": [],
             "metrics": [],
+            "database": {"id": 0, "backend": "",},
         }
+        try:
+            datasource_data = datasource.data if datasource else dummy_datasource_data
+        except (SupersetException, SQLAlchemyError):
+            datasource_data = dummy_datasource_data
+
         bootstrap_data = {
             "can_add": slice_add_perm,
             "can_download": slice_download_perm,
             "can_overwrite": slice_overwrite_perm,
-            "datasource": datasource.data if datasource else dummy_datasource_data,
+            "datasource": datasource_data,
             "form_data": form_data,
             "datasource_id": datasource_id,
             "datasource_type": datasource_type,
@@ -2231,7 +2230,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             QueryStatus.SUCCESS,
             QueryStatus.TIMED_OUT,
         ]:
-            logger.error(
+            logger.warning(
                 "Query with client_id %s could not be stopped: "
                 "query already complete",
                 str(client_id),
@@ -2622,18 +2621,14 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             columns = [c["name"] for c in obj["columns"]]
             df = pd.DataFrame.from_records(obj["data"], columns=columns)
             logger.info("Using pandas to convert to CSV")
-            csv = df.to_csv(index=False, **config["CSV_EXPORT"])
         else:
             logger.info("Running a query to turn into CSV")
             sql = query.select_sql or query.executed_sql
             df = query.database.get_df(sql, query.schema)
-            # TODO(bkyryliuk): add compression=gzip for big files.
-            csv = df.to_csv(index=False, **config["CSV_EXPORT"])
-        response = Response(csv, mimetype="text/csv")
+        csv_data = csv.df_to_escaped_csv(df, index=False, **config["CSV_EXPORT"])
         quoted_csv_name = parse.quote(query.name)
-        response.headers["Content-Disposition"] = (
-            f'attachment; filename="{quoted_csv_name}.csv"; '
-            f"filename*=UTF-8''{quoted_csv_name}.csv"
+        response = CsvResponse(
+            csv_data, headers=generate_download_headers("csv", quoted_csv_name)
         )
         event_info = {
             "event_type": "data_export",
@@ -2793,7 +2788,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             .scalar()
         )
         if welcome_dashboard_id:
-            return self.dashboard(str(welcome_dashboard_id))
+            return self.dashboard(dashboard_id_or_slug=str(welcome_dashboard_id))
 
         payload = {
             "user": bootstrap_user_data(g.user),
